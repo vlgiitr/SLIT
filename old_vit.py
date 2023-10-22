@@ -1,56 +1,8 @@
-import numpy as np
-from torchvision.transforms import Compose, ToTensor, Normalize, Lambda
-from tqdm import tqdm, trange
-from icecream import ic
 import torch
-import torch.nn as nn
-from torch.optim import Adam,AdamW
-from torch.nn import CrossEntropyLoss
-from torch.utils.data import DataLoader
+import torch.nn.functional as F
 
-from torchvision.transforms import ToTensor
-from torchvision.datasets.mnist import MNIST
-
-np.random.seed(0)
-torch.manual_seed(0)
-
-def MNIST_loaders(train_batch_size=5000, test_batch_size=10000):
-
-    transform = Compose([
-        ToTensor(),
-        Normalize((0.1307,), (0.3081,)),
-        Lambda(lambda x: torch.flatten(x))])
-
-    train_loader = DataLoader(
-        MNIST('./data/', train=True,
-              download=True,
-              transform=transform),
-        batch_size=train_batch_size, shuffle=True, drop_last = True)
-
-    test_loader = DataLoader(
-        MNIST('./data/', train=False,
-              download=True,
-              transform=transform),
-        batch_size=test_batch_size, shuffle=False, drop_last = True)
-
-    return train_loader, test_loader
-
-def patchify(images, n_patches):
-    n, x = images.shape
-
-    patches = images.view(n, n_patches**2, -1)
-    return patches
-    # # assert h == w, "Patchify method is implemented for square images only"
-
-    # patches = torch.zeros(n, n_patches ** 2, h * w * c // n_patches ** 2)
-    # patch_size = h // n_patches
-
-    # for idx, image in enumerate(images):
-    #     for i in range(n_patches):
-    #         for j in range(n_patches):
-    #             patch = image[:, i * patch_size: (i + 1) * patch_size, j * patch_size: (j + 1) * patch_size]
-    #             patches[idx, i * n_patches + j] = patch.flatten()
-    # return patches
+from torch import nn
+from einops import rearrange
 
 class multiClassHingeLoss(nn.Module):
     def __init__(self, p=2, margin=0.2, weight=None, size_average=True):
@@ -79,328 +31,177 @@ class multiClassHingeLoss(nn.Module):
         if(self.size_average):
             loss/=output.size()[0]#output.size()[0]
         return loss 
-
+    
 class Layer(nn.Linear):
     def __init__(self, in_features, out_features,
                  bias=True, device=None, dtype=None):
         super().__init__(in_features, out_features, bias, device, dtype)
-        # self.tanh = torch.nn.Tanh()
-        self.opt = AdamW(self.parameters(), lr=0.005) #, lr=0.01
-        # self.threshold = 2.0
-        self.num_epochs = 30
-        self.loss_fn = multiClassHingeLoss() #torch.nn.MSELoss() # 
+        self.opt = AdamW(self.parameters(), lr=linear_lr) #, lr=0.01
+        self.num_epochs = linear_epochs
+        self.loss_fn = multiClassHingeLoss() 
         self.bn = torch.nn.BatchNorm1d(out_features)
         # self.ln = torch.nn.LayerNorm(500)
 
-    def forward(self, x, train):
+    def forward(self, x):
         x_direction = x / (x.norm(2, 1, keepdim=True) + 1e-4)
-        # x_direction = x
         out = torch.matmul(x_direction, self.weight.T) + self.bias.unsqueeze(0)
-        # out = self.bn(out)
         return torch.relu(out)
     
-    def train(self, label, input):
-        for i in tqdm(range(self.num_epochs)):
-            out = self.forward(input, True)
-            # ic(out.size())
-            m=out.shape[0]
-            out=out.view(m,10,-1)
-            out = out.mean(dim = -1)
-            loss = torch.log(self.loss_fn(out.float(), label))
-            loss.backward()
-            self.opt.step()
-            self.opt.zero_grad()
-        # ic(out[:5])
-        # ic(label[:5])   
-        return self.forward(input, False).detach()
-
-class MyMSA(nn.Module):
-    def __init__(self, d, n_heads=2):
-        super(MyMSA, self).__init__()
-        self.d = d
-        self.n_heads = n_heads
-        assert d % n_heads == 0, f"Can't divide dimension {d} into {n_heads} heads"
-
-        d_head = int(d / n_heads)
-        self.q_mappings = nn.ModuleList([nn.Linear(d_head, d_head) for _ in range(self.n_heads)])
-        self.k_mappings = nn.ModuleList([nn.Linear(d_head, d_head) for _ in range(self.n_heads)])
-        self.v_mappings = nn.ModuleList([nn.Linear(d_head, d_head) for _ in range(self.n_heads)])
+    def train(self, train_loader):
+        mem = []
+        lab = []
         
-        self.num_epochs = 10
-        self.opt = AdamW(self.parameters(), lr=0.01) #, lr=0.01
-        self.loss_fn = multiClassHingeLoss()
+        for i in (range(self.num_epochs)):
+            epoch_start = time.time()
+            batch_only_time = 0
+            for (inputs, labels) in train_loader:
+                batch_start = time.time()
+                inputs, labels = torch.squeeze(inputs.cuda(), dim=0), torch.squeeze(labels.cuda(), dim=0)        
+                out = self.forward(inputs)
+                out = out.view(out.shape[0],-1)
+                m, hw = out.shape
+                if hw % 10 == 0:
+                    out = out
+                else:
+                    out = out[:, 0 : -(hw%10)]
+                out = out.view(m, 10, -1)
+                out = out.mean(dim = -1)
+                loss = torch.log(self.loss_fn(out.float(), labels.cuda()))
+                loss.backward(retain_graph=False)
+                self.opt.step()
+                self.opt.zero_grad()
+                inputs.cpu()
+                labels.cpu()
 
-        self.d_head = d_head
-        self.softmax = nn.Softmax(dim=-1)
+                if i==self.num_epochs-1:
+                    fwd = self.forward(inputs).detach()
+                    mem.append(fwd)
+                    lab.append(labels.detach())
+                batch_end = time.time()
+                batch_only_time += batch_end - batch_start
+            epoch_end = time.time()
+            # print(f"linear loss: {loss}")
+            # print("Epoch {} completed in {} seconds".format(i, epoch_end - epoch_start))
+            # print("Batch time: {}".format(batch_only_time)) 
+        buffer_loader = DataLoader(list(zip(mem, lab)), batch_size = 1)
+        
+        del lab
+        del mem
+        torch.cuda.empty_cache()
+        
+        return buffer_loader
 
-    def forward(self, sequences, train):
-        # Sequences has shape (N, seq_length, token_dim)
-        # We go into shape    (N, seq_length, n_heads, token_dim / n_heads)
-        # And come back to    (N, seq_length, item_dim)  (through concatenation)
-        result = []
-        for sequence in sequences:
-            seq_result = []
-            for head in range(self.n_heads):
-                q_mapping = self.q_mappings[head]
-                k_mapping = self.k_mappings[head]
-                v_mapping = self.v_mappings[head]
+class Residual(nn.Module):
+    def __init__(self, fn):
+        super().__init__()
+        self.fn = fn
 
-                seq = sequence[:, head * self.d_head: (head + 1) * self.d_head]
-                q, k, v = q_mapping(seq), k_mapping(seq), v_mapping(seq)
+    def forward(self, x, **kwargs):
+        return self.fn(x, **kwargs) + x
 
-                attention = self.softmax(q @ k.T / (self.d_head ** 0.5))
-                seq_result.append(attention @ v)
-            result.append(torch.hstack(seq_result))
-        return torch.cat([torch.unsqueeze(r, dim=0) for r in result])
-    
-    def train(self, label, input):
-        for i in tqdm(range(self.num_epochs)):
-            out = self.forward(input, True)
-            # ic(out.size())
-            m,_,_=out.shape
-            out=out.view(m,10,-1)
-            # out = out.swapaxes(1,2)
-            out = out.mean(dim = -1)
-            # out = (torch.nn.Tanh(out)+1)/2
-            # out = torch.sigmoid(out)
-            loss = torch.log(self.loss_fn(out.float(), label))
-            loss.backward(retain_graph=True)
-            self.opt.step()
-            self.opt.zero_grad()
-            # ic(out[:5])
-        # ic(out[:5])
-        # ic(label[:5])   
-        return self.forward(input, False).detach() 
+class PreNorm(nn.Module):
+    def __init__(self, dim, fn):
+        super().__init__()
+        self.norm = nn.LayerNorm(dim)
+        self.fn = fn
 
-class MyViTBlock(nn.Module):
-    def __init__(self, hidden_d, n_heads, mlp_ratio=4):
-        super(MyViTBlock, self).__init__()
-        self.hidden_d = hidden_d
-        self.n_heads = n_heads
+    def forward(self, x, **kwargs):
+        return self.fn(self.norm(x), **kwargs)
 
-        self.norm1 = nn.LayerNorm(hidden_d)
-        self.mhsa = MyMSA(hidden_d, n_heads)
-        self.norm2 = nn.LayerNorm(hidden_d)
-        # self.mlp = nn.Sequential(
-        #     nn.Linear(hidden_d, mlp_ratio * hidden_d),
-        #     nn.GELU(),
-        #     nn.Linear(mlp_ratio * hidden_d, hidden_d)
-        # )
-        self.linear1 = Layer(hidden_d, mlp_ratio * hidden_d)
-        self.linear2 = Layer(mlp_ratio * hidden_d, hidden_d)
-        self.layers = []
-        # self.layers.append(self.mhsa.cuda())
-        self.layers.append(self.linear1.cuda())
-        self.layers.append(self.linear2.cuda())
+class FeedForward(nn.Module):
+    def __init__(self, dim, hidden_dim):
+        super().__init__()
+        self.net = nn.Sequential(
+            nn.Layer(dim, hidden_dim),
+            nn.GELU(),
+            nn.Layer(hidden_dim, dim)
+        )
 
-    def forward(self, x, train):
-        out = x + self.mhsa(self.norm1(x),False)
-        temp = self.linear1(self.norm2(out),False)
-        out = out + self.linear2(temp,False)
+    def forward(self, x):
+        return self.net(x)
+
+class Attention(nn.Module):
+    def __init__(self, dim, heads=8):
+        super().__init__()
+        self.heads = heads
+        self.scale = dim ** -0.5
+
+        self.to_qkv = nn.Layer(dim, dim * 3, bias=False)
+        self.to_out = nn.Layer(dim, dim)
+
+    def forward(self, x, mask = None):
+        b, n, _, h = *x.shape, self.heads
+        qkv = self.to_qkv(x)
+        q, k, v = rearrange(qkv, 'b n (qkv h d) -> qkv b h n d', qkv=3, h=h)
+
+        dots = torch.einsum('bhid,bhjd->bhij', q, k) * self.scale
+
+        if mask is not None:
+            mask = F.pad(mask.flatten(1), (1, 0), value = True)
+            assert mask.shape[-1] == dots.shape[-1], 'mask has incorrect dimensions'
+            mask = mask[:, None, :] * mask[:, :, None]
+            dots.masked_fill_(~mask, float('-inf'))
+            del mask
+
+        attn = dots.softmax(dim=-1)
+
+        out = torch.einsum('bhij,bhjd->bhid', attn, v)
+        out = rearrange(out, 'b h n d -> b n (h d)')
+        out =  self.to_out(out)
         return out
 
-    def train(self, label, input):
-        print('training mhsa...')
-        input = input + self.mhsa.train(label, self.norm1(input))
-        for i, layer in enumerate(self.layers):
-            print('training layer', i, '...')
-            # ic(input.shape)
-            input = layer.train(label, input)
-        return self.forward(input, False).detach() 
+class Transformer(nn.Module):
+    def __init__(self, dim, depth, heads, mlp_dim):
+        super().__init__()
+        self.layers = nn.ModuleList([])
+        for _ in range(depth):
+            self.layers.append(nn.ModuleList([
+                Residual(PreNorm(dim, Attention(dim, heads = heads))),
+                Residual(PreNorm(dim, FeedForward(dim, mlp_dim)))
+            ]))
+
+    def forward(self, x, mask=None):
+        for attn, ff in self.layers:
+            x = attn(x, mask=mask)
+            x = ff(x)
+        return x
+
+class ViT(nn.Module):
+    def __init__(self, *, image_size, patch_size, num_classes, dim, depth, heads, mlp_dim, channels=3):
+        super().__init__()
+        assert image_size % patch_size == 0, 'image dimensions must be divisible by the patch size'
+        num_patches = (image_size // patch_size) ** 2
+        patch_dim = channels * patch_size ** 2
+
+        self.patch_size = patch_size
+
+        self.pos_embedding = nn.Parameter(torch.randn(1, num_patches + 1, dim))
+        self.patch_to_embedding = nn.Linear(patch_dim, dim)
+        self.cls_token = nn.Parameter(torch.randn(1, 1, dim))
+        self.transformer = Transformer(dim, depth, heads, mlp_dim)
+
+        self.to_cls_token = nn.Identity()
+
+        self.mlp_head = nn.Sequential(
+            nn.Linear(dim, mlp_dim),
+            nn.GELU(),
+            nn.Linear(mlp_dim, num_classes)
+        )
+
+    def forward(self, img, mask=None):
+        p = self.patch_size
+
+        x = rearrange(img, 'b c (h p1) (w p2) -> b (h w) (p1 p2 c)', p1 = p, p2 = p)
+        x = self.patch_to_embedding(x)
+
+        cls_tokens = self.cls_token.expand(img.shape[0], -1, -1)
+        x = torch.cat((cls_tokens, x), dim=1)
+        x += self.pos_embedding
+        x = self.transformer(x, mask)
+
+        x = self.to_cls_token(x[:, 0])
+        return self.mlp_head(x)
     
-class MyViT(nn.Module):
-    def __init__(self, chw, n_patches=7, n_blocks=2, hidden_d=10, n_heads=2, out_d=10):
-        # Super constructor
-        super(MyViT, self).__init__()
-        
-        # Attributes
-        self.chw = chw # ( C , H , W )
-        self.n_patches = n_patches
-        self.n_blocks = n_blocks
-        self.n_heads = n_heads
-        self.hidden_d = hidden_d
-        
-        # Input and patches sizes
-        assert chw[1] % n_patches == 0, "Input shape not entirely divisible by number of patches"
-        assert chw[2] % n_patches == 0, "Input shape not entirely divisible by number of patches"
-        self.patch_size = (chw[1] / n_patches, chw[2] / n_patches)
-
-        # 1) Linear mapper
-        # self.input_d = int(chw[0] * self.patch_size[0] * self.patch_size[1])
-        self.linear_mapper = Layer(chw[1]*chw[2], n_patches ** 2 * hidden_d)
-        
-        # 2) Learnable classification token
-        # self.class_token = nn.Parameter(torch.rand(1, self.hidden_d))
-        
-        # 3) Positional embedding
-        self.register_buffer('positional_embeddings', get_positional_embeddings(n_patches ** 2, hidden_d), persistent=False)
-        
-        # 4) Transformer encoder blocks
-        self.blocks = nn.ModuleList([MyViTBlock(hidden_d, n_heads) for _ in range(n_blocks)])
-        
-        # 5) Classification MLPk
-        self.mlp = Layer(self.hidden_d, out_d)
-        # self.mlp = nn.Sequential(
-        #     nn.Linear(self.hidden_d, out_d),
-        #     nn.Softmax(dim=-1)
-        # )
-
-    def predict(self, images):
-            # Running linear layer tokenization
-            # Map the vector corresponding to each patch to the hidden size dimension
-            images = self.linear_mapper(images, False)
-            
-            # Dividing images into patches
-            n, x = images.shape
-            patches = patchify(images, self.n_patches).to(self.positional_embeddings.device)
-            
-            
-            # Adding classification token to the tokens
-            # tokens = torch.cat((self.class_token.expand(n, 1, -1), tokens), dim=1)
-            
-            # Adding positional embedding
-            out = patches + self.positional_embeddings.repeat(n, 1, 1)
-            
-            # Transformer Blocks
-            for block in self.blocks:
-                out = block(out, False)
-                
-            # Getting the classification token only
-            # out = out[:, 0]
-
-            out = self.mlp(out, False)
-            # ic(out.size())
-            # ic(out[1])
-            # m,hw=out.shape
-            # out=out.view(m,-1,hw//10)
-            m=out.shape[0]
-            out=out.view(m,10,-1)
-            out = out.mean(dim = -1)
-            # out = torch.swapaxes(out,1,2)
-            # ic(out.size())
-            # ic(out[1])
-            # out= out.mean(dim = -1)
-            _,fin_out=torch.max(out,dim=-1)
-            # ic(fin_out[0])
-            # ic(out[:5])
-            # ic(fin_out[:5])
-            return fin_out
-            # return self.mlp(out, False) # Map to output dimension, output category distribution
-
-    def train(self, label, input):
-        print('training linear mapper...')
-        input = self.linear_mapper.train(label, input)
-
-        n, x = input.shape
-        input = patchify(input, self.n_patches).to(self.positional_embeddings.device)
-
-        input = input + self.positional_embeddings.repeat(n, 1, 1)
-
-        for i, block in enumerate(self.blocks):
-            print('training block', i, '...')
-            input = block.train(label,input)
-        
-        print('training mlp...')
-        self.mlp.train(label, input)
-    
-def get_positional_embeddings(sequence_length, d):
-    result = torch.ones(sequence_length, d)
-    for i in range(sequence_length):
-        for j in range(d):
-            result[i][j] = np.sin(i / (10000 ** (j / d))) if j % 2 == 0 else np.cos(i / (10000 ** ((j - 1) / d)))
-    return result
-
-def get_n_params(model):
-    pp=0
-    for p in list(model.parameters()):
-        nn=1
-        for s in list(p.size()):
-            nn = nn*s
-        pp += nn
-    return pp
-
-def main():
-    # device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    # model = MyViT((1, 28, 28))
-    # Loading data
-    # transform = ToTensor()
-
-    # train_set = MNIST(root='./../datasets', train=True, download=True, transform=transform)
-    # test_set = MNIST(root='./../datasets', train=False, download=True, transform=transform)
-
-    # train_loader = DataLoader(
-    #     MNIST('./data/', train=True,
-    #           download=True,
-    #           transform=transform),
-    #     batch_size=128, shuffle=True)
-    
-
-    # test_loader = DataLoader(
-    #     MNIST('./data/', train=False,
-    #           download=True,
-    #           transform=transform),
-    #     batch_size=128, shuffle=False)
-    
-    train_loader, test_loader = MNIST_loaders()
-
-    # Defining model and training options
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    print("Using device: ", device, f"({torch.cuda.get_device_name(device)})" if torch.cuda.is_available() else "")
-    model = MyViT((1, 28, 28)).to(device)
-    
-    # N_EPOCHS = 1
-    # LR = 0.005
-
-    # # Training loop
-    # optimizer = Adam(model.parameters(), lr=LR)
-    # criterion = CrossEntropyLoss()
-
-    x = get_n_params(model)
-    ic(x)    
-
-    x, y = next(iter(train_loader))
-    x, y = x.cuda(), y.cuda()
-    model.train(y,x)
-    # for epoch in trange(N_EPOCHS, desc="Training"):
-    #     train_loss = 0.0
-    #     for batch in tqdm(train_loader, desc=f"Epoch {epoch + 1} in training", leave=False):
-    #         x, y = batch
-    #         x, y = x.to(device), y.to(device)
-    #         y_hat = model(x)
-    #         loss = criterion(y_hat, y)
-
-    #         train_loss += loss.detach().cpu().item() / len(train_loader)
-
-    #         optimizer.zero_grad()
-    #         loss.backward()
-    #         optimizer.step()
-
-    #     print(f"Epoch {epoch + 1}/{N_EPOCHS} loss: {train_loss:.2f}")
-
-    # # Test loop
-    # with torch.no_grad():
-    #     correct, total = 0, 0
-    #     test_loss = 0.0
-    #     for batch in tqdm(test_loader, desc="Testing"):
-    #         x, y = batch
-    #         x, y = x.to(device), y.to(device)
-    #         y_hat = model(x)
-    #         loss = criterion(y_hat, y)
-    #         test_loss += loss.detach().cpu().item() / len(test_loader)
-
-    #         correct += torch.sum(torch.argmax(y_hat, dim=1) == y).detach().cpu().item()
-    #         total += len(x)
-    #     print(f"Test loss: {test_loss:.2f}")
-    #     print(f"Test accuracy: {correct / total * 100:.2f}%")
-
-    print('train error:', 1.0 - model.predict(x).eq(y).float().mean().item())
-    # print('Train time: ', time1)
-
-    x_te, y_te = next(iter(test_loader))
-    x_te, y_te = x_te.cuda(), y_te.cuda()
-
-    print('test error:', 1.0 - model.predict(x_te).eq(y_te).float().mean().item())
-
-
 if __name__ == '__main__':
-    main()
+    torch.manual_seed(1234)
+    

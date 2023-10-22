@@ -23,30 +23,27 @@ torch.cuda.manual_seed_all(seed)
 
 
 
-
-
-def MNIST_loaders(train_batch_size=5000, test_batch_size=10000):
+def CIFAR10_loaders(train_batch_size=1024, test_batch_size=5000):
 
     transform = Compose([
         ToTensor(),
-        Normalize((0.1307,), (0.3081,)),
-        #Lambda(lambda x: torch.flatten(x))
-        ])
+        Normalize((0.49139968, 0.48215827, 0.44653124), (0.24703233, 0.24348505, 0.26158768)),
+        # Lambda(lambda x: torch.flatten(x))]
+    ])
 
     train_loader = DataLoader(
-        MNIST('./data/', train=True,
+        CIFAR10('./data/', train=True,
               download=True,
               transform=transform),
         batch_size=train_batch_size, shuffle=True)
 
     test_loader = DataLoader(
-        MNIST('./data/', train=False,
+        CIFAR10('./data/', train=False,
               download=True,
               transform=transform),
         batch_size=test_batch_size, shuffle=False)
 
     return train_loader, test_loader
-
 
 
 class multiClassHingeLoss(nn.Module):
@@ -97,17 +94,18 @@ class ConvNet(nn.Module):
     def __init__(self):
         super(ConvNet, self).__init__()
         self.relu = torch.nn.ReLU()
-        self.conv1 = torch.nn.Conv2d(1, 32, 3, stride = 1, padding = 0)
-        self.bn1=torch.nn.BatchNorm2d(32)
-        self.conv2 = torch.nn.Conv2d(32, 32, 3, stride = 1, padding = 0)
-        self.bn2=torch.nn.BatchNorm2d(32)
-        self.conv3 = torch.nn.Conv2d(32, 64, 3, stride = 1, padding = 0)
-        self.bn3=torch.nn.BatchNorm2d(64)
-        self.conv4 = torch.nn.Conv2d(64, 64, 3, stride = 5, padding = 0)
-        self.bn4=torch.nn.BatchNorm2d(64)
-        self.fc = nn.Linear(1024, 10)
+        self.pool=torch.nn.MaxPool2d(2,2)
+        self.conv1 = torch.nn.Conv2d(3, 64, 3, stride = 1, padding = 1)
+        self.bn1=torch.nn.BatchNorm2d(64)
+        self.conv2 = torch.nn.Conv2d(64, 64, 3, stride = 1, padding = 1)
+        self.bn2=torch.nn.BatchNorm2d(64)
+        self.conv3 = torch.nn.Conv2d(64, 128, 3, stride = 1, padding = 1)
+        self.bn3=torch.nn.BatchNorm2d(128)
+        # self.conv4 = torch.nn.Conv2d(64, 64, 3, stride = 5, padding = 0)
+        # self.bn4=torch.nn.BatchNorm2d(64)
+        self.fc = nn.Linear(32768, 10)
         self.bn = torch.nn.BatchNorm1d(10)
-        self.num_epochs = 40
+        self.num_epochs = 20
 
     def forward(self, x):
         
@@ -117,19 +115,21 @@ class ConvNet(nn.Module):
         x = self.conv2(x)
         x = self.bn2(x)
         x = self.relu(x)
+        x = self.pool(x)
         x = self.conv3(x)
         x = self.bn3(x)
         x = self.relu(x)
-        x = self.conv4(x)
-        x = self.bn4(x)
-        x = self.relu(x)
+        # x = self.conv4(x)
+        # x = self.bn4(x)
+        # x = self.relu(x)
         x = torch.flatten(x, start_dim = 1)
         x = self.fc(x)
         x = self.bn(x)
         x = self.relu(x)
         return x
-    def train(self, images, labels):
+    def train(self, train_loader):
         for epoch in range(self.num_epochs):
+           for j, (images, labels) in enumerate(train_loader): 
             
             images = images.to(device)
             labels = labels.to(device)
@@ -155,29 +155,40 @@ class ConvNet(nn.Module):
         return fin_out
     
 model = ConvNet()
-train_loader, test_loader = MNIST_loaders()
+train_loader, test_loader = CIFAR10_loaders()
 # criterion = nn.MSELoss()
 criterion = multiClassHingeLoss()
-optimizer = Adam(model.parameters(), lr=0.006)
+optimizer = Adam(model.parameters(), lr=0.0008)
 
 
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 model.to(device)
 
-x, y = next(iter(train_loader))
-x, y = x.cuda(), y.cuda()
+# x, y = next(iter(train_loader))
+# x, y = x.cuda(), y.cuda()
 st = time.time()
-model.train(x, y)
+model.train(train_loader)
 et = time.time()
 time1 = (et-st)*1000
+output=0
+for data in train_loader:
+        x,y=data
+        x, y = torch.squeeze(x.cuda(),dim=0), torch.squeeze(y.cuda(),dim=0)
+        output+=model.predict(x).eq(y).float().sum().item()
 
-print('train error:', 1.0 - model.predict(x).eq(y).float().mean().item())
+
+print('train error:', 1.0 - (output/50000))
 print('Train time: ', time1)
 
-x_te, y_te = next(iter(test_loader))
-x_te, y_te = x_te.cuda(), y_te.cuda()
+# x_te, y_te = next(iter(test_loader))
+# x_te, y_te = x_te.cuda(), y_te.cuda()
+output=0
+for data in test_loader:
+        x,y=data
+        x, y = torch.squeeze(x.cuda(),dim=0), torch.squeeze(y.cuda(),dim=0)
+        output+=model.predict(x).eq(y).float().sum().item()
+print('test error:', 1.0 - (output/10000))
 
-print('test error:', 1.0 - model.predict(x_te).eq(y_te).float().mean().item())
 
 
 from nvitop import Device, GpuProcess, NA, colored
