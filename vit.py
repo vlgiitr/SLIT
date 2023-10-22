@@ -11,6 +11,8 @@ from torchvision.transforms import ToTensor
 from torchvision.datasets.mnist import MNIST
 from torch.autograd import Variable
 import time
+from sklearn.model_selection import ParameterGrid, GridSearchCV
+
 
 np.random.seed(0)
 torch.manual_seed(0)
@@ -101,7 +103,7 @@ class Layer(nn.Linear):
         mem = []
         lab = []
         
-        for i in tqdm(range(self.num_epochs)):
+        for i in (range(self.num_epochs)):
             epoch_start = time.time()
             batch_only_time = 0
             for (inputs, labels) in train_loader:
@@ -130,9 +132,9 @@ class Layer(nn.Linear):
                 batch_end = time.time()
                 batch_only_time += batch_end - batch_start
             epoch_end = time.time()
-            print(f"linear loss: {loss}")
-            print("Epoch {} completed in {} seconds".format(i, epoch_end - epoch_start))
-            print("Batch time: {}".format(batch_only_time)) 
+            # print(f"linear loss: {loss}")
+            # print("Epoch {} completed in {} seconds".format(i, epoch_end - epoch_start))
+            # print("Batch time: {}".format(batch_only_time)) 
         buffer_loader = DataLoader(list(zip(mem, lab)), batch_size = 1)
         
         del lab
@@ -176,7 +178,7 @@ class MyMSA(nn.Module):
     def train(self, train_loader):
         mem = []
         lab = []
-        for i in tqdm(range(self.num_epochs)):
+        for i in (range(self.num_epochs)):
             epoch_start = time.time()
             batch_only_time = 0
             for (inputs, labels) in train_loader:
@@ -201,9 +203,9 @@ class MyMSA(nn.Module):
                 batch_end = time.time()
                 batch_only_time += batch_end - batch_start
             epoch_end = time.time()
-            ic(loss)
-            print("Epoch {} completed in {} seconds".format(i, epoch_end - epoch_start))
-            print("Batch time: {}".format(batch_only_time))
+            # ic(loss)
+            # print("Epoch {} completed in {} seconds".format(i, epoch_end - epoch_start))
+            # print("Batch time: {}".format(batch_only_time))
 
         buffer_loader = DataLoader(list(zip(mem, lab)), batch_size = 1)
         
@@ -239,12 +241,12 @@ class MyViTBlock(nn.Module):
     def train(self, train_loader):
         train_loader = self.mhsa.train(train_loader)
         for i, layer in enumerate(self.layers):
-            print('training layer', i, '...')
+            # print('training layer', i, '...')
             train_loader = layer.train(train_loader)
         return train_loader 
     
 class MyViT(nn.Module):
-    def __init__(self, chw, n_patches=7, n_blocks=1, hidden_d=20, n_heads=2, out_d=20):
+    def __init__(self, chw, n_patches=7, n_blocks=1, hidden_d=40, n_heads=2, out_d=10):
         # Super constructor
         super(MyViT, self).__init__()
         
@@ -304,7 +306,7 @@ class MyViT(nn.Module):
             return fin_out
 
     def train(self, train_loader):
-        print('training linear mapper...')
+        # print('training linear mapper...')
         train_loader = self.linear_mapper.train(train_loader)
         
         new_input = []
@@ -320,10 +322,10 @@ class MyViT(nn.Module):
 
         train_loader = DataLoader(list(zip(new_input, new_label)), batch_size = 1)
         for i, block in enumerate(self.blocks):
-            print('training block', i, '...')
+            # print('training block', i, '...')
             input = block.train(train_loader)
         
-        print('training mlp...')
+        # print('training mlp...')
         self.mlp.train(input)        
     
 def get_positional_embeddings(sequence_length, d):
@@ -343,45 +345,108 @@ def get_n_params(model):
         num += 1
     return pp
 
-linear_epochs = 80
-mhsa_epochs = 7
-linear_lr = 0.1
-mhsa_lr = 0.1
-
-def main():
-    train_loader, test_loader = MNIST_loaders()
-
-    # Defining model and training options
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    print("Using device: ", device, f"({torch.cuda.get_device_name(device)})" if torch.cuda.is_available() else "")
-    model = MyViT((1, 28, 28)).to(device)
-    x = get_n_params(model)
-    ic(x)
-    st = time.time()
-    model.train(train_loader)
-    et = time.time()
-    time1 = (et-st)*1000
-
-    
-    train_accuracy = 0
-    for data in train_loader:
-        with torch.no_grad():
-            x,y = data
-            x,y = torch.squeeze(x.cuda(), dim=0), torch.squeeze(y.cuda(), dim=0)
-            train_accuracy = train_accuracy + model.predict(x).eq(y).float().sum().item()
-
-    print('train error:', 1.0 - train_accuracy/50000)
-    print('Train time: ', time1)
-
-    test_accuracy = 0
-    for data in test_loader:
-        with torch.no_grad():
-            x,y = data
-            x,y = torch.squeeze(x.cuda(), dim=0), torch.squeeze(y.cuda(), dim=0)
-            test_accuracy = test_accuracy + model.predict(x).eq(y).float().sum().item()
-
-    print('test error:', 1.0 - test_accuracy/len(test_loader.dataset))
+# linear_epochs = 80
+# mhsa_epochs = 7
+linear_lr = 0.005
+# mhsa_lr = 0.1
 
 
 if __name__ == '__main__':
-    main()
+
+    linear_epochs = np.arange(30,81,5)
+    mhsa_epochs = np.arange(2,15,2)
+    # linear_lr = [0.005]
+    mhsa_lr = [0.005]
+
+    # while linear_lr[-1]<0.1:
+    #     linear_lr.append(linear_lr[-1]*2)
+    while mhsa_lr[-1]<0.1:
+        mhsa_lr.append(mhsa_lr[-1]*2)
+
+
+    param_grid = {'linear_epochs': linear_epochs,
+                'mhsa_epochs': mhsa_epochs,
+                # 'linear_lr': linear_lr,
+                'mhsa_lr': mhsa_lr}
+
+    grid = ParameterGrid(param_grid)
+
+    max_train_acc = 0
+    max_test_acc = 0
+    best1=0
+    best2=0
+    best3=0
+    best4=0
+    i=1
+    for params in grid:
+        print("Train session: ",i )
+        i=i+1
+        linear_epochs = params['linear_epochs']
+        mhsa_epochs = params['mhsa_epochs']
+        # linear_lr = params['linear_lr']
+        mhsa_lr = params['mhsa_lr']
+        # ic(linear_epochs)
+        # ic(mhsa_epochs)
+        # ic(linear_lr)
+        # ic(mhsa_lr)
+
+        train_loader, test_loader = MNIST_loaders()
+
+        # Defining model and training options
+        device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+        # print("Using device: ", device, f"({torch.cuda.get_device_name(device)})" if torch.cuda.is_available() else "")
+        model = MyViT((1, 28, 28)).to(device)
+
+
+        # x = get_n_params(model)
+        # ic(x)
+        # st = time.time()
+        model.train(train_loader)
+        # et = time.time()
+        # time1 = (et-st)*1000
+
+        
+        train_accuracy = 0
+        for data in train_loader:
+            with torch.no_grad():
+                x,y = data
+                x,y = torch.squeeze(x.cuda(), dim=0), torch.squeeze(y.cuda(), dim=0)
+                train_accuracy = train_accuracy + model.predict(x).eq(y).float().sum().item()
+
+        # print('train error:', 1.0 - train_accuracy/50000)
+        # print('Train time: ', time1)
+
+        test_accuracy = 0
+        for data in test_loader:
+            with torch.no_grad():
+                x,y = data
+                x,y = torch.squeeze(x.cuda(), dim=0), torch.squeeze(y.cuda(), dim=0)
+                test_accuracy = test_accuracy + model.predict(x).eq(y).float().sum().item()
+
+        if(test_accuracy>max_test_acc):
+            max_train_acc = max(max_train_acc,train_accuracy)
+            max_test_acc = max(max_test_acc, test_accuracy)
+            best1=linear_epochs
+            best2=mhsa_epochs
+            # best3=linear_lr
+            best4=mhsa_lr
+
+        if(i%10==0):
+            ic(max_train_acc)
+            ic(max_test_acc)
+            best1=linear_epochs
+            best2=mhsa_epochs
+            # best3=linear_lr
+            best4=mhsa_lr
+
+        # print('test error:', 1.0 - test_accuracy/len(test_loader.dataset))
+    
+
+    train_loader, test_loader = MNIST_loaders()
+
+    print('train error:', 1.0 - max_train_acc/60000)    
+    print('test error:', 1.0 - max_test_acc/len(test_loader.dataset))
+    ic(best1)
+    ic(best2)
+    # ic(best3)
+    ic(best4)

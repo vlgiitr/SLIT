@@ -11,81 +11,52 @@ from icecream import ic
 from torch_lr_finder import LRFinder
 import numpy as np
 import time
+from torchvision import datasets
 
 torch.set_printoptions(profile="full")
 
-def MNIST_loaders(train_batch_size=50000, test_batch_size=10000):
+
+
+def MNIST_loaders(train_batch_size=20000, test_batch_size=10000):
 
     transform = Compose([
         ToTensor(),
         Normalize((0.1307,), (0.3081,)),
-        Lambda(lambda x: torch.flatten(x))])
+        Lambda(lambda x: torch.flatten(x))
+        ])
 
     train_loader = DataLoader(
         MNIST('./data/', train=True,
               download=True,
               transform=transform),
-        batch_size=train_batch_size, shuffle=True)
+        batch_size = train_batch_size, shuffle = False, num_workers = 0, pin_memory = True)
 
     test_loader = DataLoader(
         MNIST('./data/', train=False,
               download=True,
               transform=transform),
-        batch_size=test_batch_size, shuffle=False)
+        batch_size=test_batch_size, shuffle=False, num_workers = 0, pin_memory = True)
 
-    return train_loader, test_loader
+    train_cuda_list = []
+    for (train_data, train_labels) in train_loader:
+        train_cuda_list.append((train_data.cuda(), train_labels.cuda()))
+    cuda_train_loader = DataLoader(train_cuda_list, batch_size = 1, shuffle = False, num_workers = 0)
+    return cuda_train_loader, test_loader
 
-def CIFAR10_loaders(train_batch_size=50000, test_batch_size=10000):
 
-    transform = Compose([
-        ToTensor(),
-        Normalize((0.49139968, 0.48215827, 0.44653124), (0.24703233, 0.24348505, 0.26158768)),
-        Lambda(lambda x: torch.flatten(x))])
-
-    train_loader = DataLoader(
-        CIFAR10('./data/', train=True,
-              download=True,
-              transform=transform),
-        batch_size=train_batch_size, shuffle=True)
-
-    test_loader = DataLoader(
-        CIFAR10('./data/', train=False,
-              download=True,
-              transform=transform),
-        batch_size=test_batch_size, shuffle=False)
-
-    return train_loader, test_loader
-
-def overlay_y_on_x(x, y):
-    """Replace the first 10 pixels of data [x] with one-hot-encoded label [y]
-    """
-    x_ = x.clone()
-    x_[:, :10] *= 0.0
-    x_[range(x.shape[0]), y] = x.max()
-    return x_
 
 class multiClassHingeLoss(nn.Module):
-    def __init__(self, p=2, margin=0.5, weight=None, size_average=True):
+    def __init__(self, p=2, margin=0.2, weight=None, size_average=True):
         super(multiClassHingeLoss, self).__init__()
         self.p=p
         self.margin=margin
         self.weight=weight#weight for each class, size=n_class, variable containing FloatTensor,cuda,reqiures_grad=False
         self.size_average=size_average
     def forward(self, output, y):#output: batchsize*n_class
-        #print(output.requires_grad)
-        #print(y.requires_grad)
-
+       
         output_y=output[torch.arange(0,y.size()[0]).long().cuda(),y.data.cuda()].view(-1,1)#view for transpose
-        
-        # ic(output_y.size())
-        #margin - output[y] + output[i]
-
+      
         loss=output-output_y+self.margin#contains i=y
-
-        # ic(loss.size())
-        # ic(loss[0])
-        # ic(output[0])
-        # ic(output_y[0])
 
         #remove i=y items
         loss[torch.arange(0,y.size()[0]).long().cuda(),y.data.cuda()]=0
@@ -114,21 +85,20 @@ class Net(torch.nn.Module):
         self.num_layers = len(dims) - 1
         for d in range(len(dims) - 1):
             self.layers += [Layer(dims[d], dims[d + 1]).cuda()]
-        # print(self.layers)
-        
+       
     def predict(self, x):
         for layer in self.layers:
-            x = layer(x, False)
+            x = layer.forward(x)
         m,hw=x.shape
-        x=x.view(m,-1,hw//10)
+        x=x.view(m,10,-1)
         x= x.mean(dim = -1)
         _,fin_out=torch.max(x,dim=-1)
         return fin_out
 
-    def train(self, label, input):
+    def train(self, input):
         for i, layer in enumerate(self.layers):
             print('training layer', i, '...')
-            input = layer.train(label, input)
+            input = layer.train(input)
 
 
 
@@ -137,79 +107,105 @@ class Layer(nn.Linear):
                  bias=True, device=None, dtype=None):
         super().__init__(in_features, out_features, bias, device, dtype)
         self.tanh = torch.nn.Tanh()
-        self.opt = Adam(self.parameters(), lr=0.005) #, lr=0.01
+        self.opt = Adam(self.parameters(), lr=0.0025) #, lr=0.01
         self.threshold = 2.0
-        self.num_epochs = 50
+        self.num_epochs = 10
         self.loss_fn = multiClassHingeLoss() # torch.nn.MSELoss() # 
-        self.bn = torch.nn.BatchNorm1d(500)
-        self.ln = torch.nn.LayerNorm(500)
+        self.bn = torch.nn.BatchNorm1d(out_features)
+        self.ln = torch.nn.LayerNorm(out_features)
 
-    def forward(self, x, train):
+    def forward(self, x):
+        # bn = torch.nn.BatchNorm1d(500).cuda()
         # x_direction = x / (x.norm(2, 1, keepdim=True) + 1e-4)
         x_direction = x
-        # tanh_o = self.tanh(torch.mm(x_direction, self.weight.T) + self.bias.unsqueeze(0))
-        # out = (tanh_o+1)/2
-        out = torch.mm(x_direction, self.weight.T) + self.bias.unsqueeze(0)
-        out = self.ln(self.bn(out))
+        
+        out = torch.matmul(x_direction, self.weight.T) + self.bias.unsqueeze(0)
+        out = self.bn(out)
+        out = self.ln(out)
         return torch.relu(out)
     
-    def train(self, label, input):
-
-        # initial_sum, final_sum = 0, 0
-        # for k in list(self.parameters()):
-        #     initial_sum += k.sum().item()
-        # ic(initial_sum)
+    def train(self, train_loader):
+        mem = []
+        lab = []
         for i in tqdm(range(self.num_epochs)):
-            out = self.forward(input, True)
-            m,_=out.shape
-            out=out.view(m,10,-1)
-            out = out.mean(dim = -1)
             
-            # assert torch.all((out >= 0) & (out <= 10))
-            # label_oh = nn.functional.one_hot(label)
-            loss = torch.log(self.loss_fn(out.float(), label))
-            # loss = torch.log(self.loss_fn(out.float(), label_oh.float()))
-            loss.backward()
-            self.opt.step()
-            self.opt.zero_grad()
-            self.opt.step()
-        # for t in list(self.parameters()):
-        #     final_sum += t.sum().item()
-        # ic(final_sum)
-        # ic(out[:10])
-        # ic(label[:10])    
-        return self.forward(input, False).detach()
+            for (inputs, labels) in train_loader:
+                
+                inputs, labels = torch.squeeze(inputs.cuda(), dim=0), torch.squeeze(labels.cuda(), dim=0)
+                # ic(inputs.size())        
+                out = self.forward(inputs)
+                out = out.view(out.shape[0],-1)
+                m, hw = out.shape
+                if hw % 10 == 0:
+                    out = out
+                else:
+                    out = out[:, 0 : -(hw%10)]
+                out = out.view(m, 10, -1)
+                out = out.mean(dim = -1)
+                loss = torch.log(self.loss_fn(out.float(), labels.int().cuda()))
+                loss.backward()
+                self.opt.step()
+                self.opt.zero_grad()
+                
+                if i==self.num_epochs-1:
+                    mem.append(self.forward(inputs).detach().cpu())
+                    lab.append(labels.detach().cpu())
+                    # mem = torch.cat((mem,self.forward(inputs).detach().cpu()),0)
+                    # lab = torch.cat((lab,labels.cpu()),0)
+                
+          
+
+        buffer_loader = DataLoader(list(zip(mem, lab)), batch_size = 1)
         
+        del lab
+        del mem
+        torch.cuda.empty_cache()
+        
+        return buffer_loader
             
+
     
-def visualize_sample(data, name='', idx=0):
-    reshaped = data[idx].cpu().reshape(28, 28)
-    plt.figure(figsize = (4, 4))
-    plt.title(name)
-    plt.imshow(reshaped, cmap="gray")
-    plt.show()
-    
+def get_n_params(model):
+    pp, num = 0, 0 
+    for p in list(model.parameters()):
+        nn=1
+        for s in list(p.size()):
+            nn = nn*s
+        pp += nn
+        num += 1
+    return pp
+
     
 if __name__ == "__main__":
     torch.manual_seed(1234)
     train_loader, test_loader = MNIST_loaders()
-
-    net = Net([784, 500, 500])
-    x, y = next(iter(train_loader))
-    x, y = x.cuda(), y.cuda()
+    net = Net([784, 500,500])
+    # print(net)
+    # print(get_n_params(net))
 
     st = time.time()
-    net.train(y, x)
+    net.train(train_loader)
     et = time.time()
     time1 = (et-st)*1000
 
-    print('train error:', 1.0 - net.predict(x).eq(y).float().mean().item())
+    train_accuracy = 0
+    for data in train_loader:
+        x,y = data
+        x,y = torch.squeeze(x.cuda(), dim=0), torch.squeeze(y.cuda(), dim=0)
+        
+        train_accuracy = train_accuracy + net.predict(x).eq(y).float().sum().item()
+
+    print('train error:', 1.0 - train_accuracy/60000)
     print('Train time: ', time1)
 
-    x_te, y_te = next(iter(test_loader))
-    x_te, y_te = x_te.cuda(), y_te.cuda()
+    test_accuracy = 0
+    for data in test_loader:
+        x,y = data
+        x,y = torch.squeeze(x.cuda(), dim=0), torch.squeeze(y.cuda(), dim=0)
+       
+        test_accuracy = test_accuracy + net.predict(x).eq(y).float().sum().item()
 
-    print('test error:', 1.0 - net.predict(x_te).eq(y_te).float().mean().item())
+    print('test error:', 1.0 - test_accuracy/10000)
 
 
     from nvitop import Device, GpuProcess, NA, colored
@@ -253,4 +249,4 @@ if __name__ == "__main__":
             print('-' * 120)
         separator = True
         
-        
+    
